@@ -1,0 +1,114 @@
+name: QA
+on: pull_request
+
+jobs:
+  qa:
+    name: QA
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.PAT }}
+      APP_ENV: 'qa'
+    steps:
+       - name: Get Node version from serverless.yml
+        id: get_node_version
+        run: |
+          # Estrai la versione dal runtime, ad esempio 'nodejs20.x' -> '20'
+          runtime=$(grep 'runtime:' serverless.yml | awk '{print $2}')
+          node_version=$(echo $runtime | sed -E 's/nodejs([0-9]+)\.x/\1/')
+          echo "node_version=$node_version" >> $GITHUB_OUTPUT
+      - name: Check out repo
+        uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.get_node_version.outputs.node_version }}
+      - name: Install node dependencies
+        run: yarn install
+      - name: Unit test
+        run: yarn test
+      - name: Lint
+        run: yarn lint
+      - name: Unit test & coverage
+        run: yarn test:coverage-summary && yarn report-coverage-details && exit ${PIPESTATUS[0]}
+      - name: Jest Coverage Comment
+        uses: MishaKav/jest-coverage-comment@main
+        with:
+          coverage-summary-path: ./reports-jest/coverage-summary.json
+          coverage-title: Coverage details
+          coverage-path: ./reports-jest/coverage.txt
+          title: Coverage JEST
+          summary-title: Coverage code
+          badge-title: Coverage
+          hide-comment: false
+          create-new-comment: false
+          hide-summary: false
+      - name: Report Coverage Output to Summary
+        run: |
+          if [[ -s ./reports-jest/coverage.txt ]]; then
+            {
+              echo "### Coverage Output"
+              echo "<details><summary>Click to expand</summary>"
+              echo ""
+              echo '```terraform'
+              cat ./reports-jest/coverage.txt
+              echo '```'
+              echo "</details>"
+            } >> $GITHUB_STEP_SUMMARY
+          fi
+      - name: name: Cache Trivy DB [${{ runner.os }} - week ${{ env.CACHE_WEEK }}]
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/trivy
+            /root/.cache/trivy
+          key: ${{ runner.os }}-trivy-db-${{ env.CACHE_WEEK }}
+          restore-keys: |
+            ${{ runner.os }}-trivy-db-
+        env:
+          CACHE_WEEK: ${{ date('Y-ww') }}
+      - name: Run security scan CODE
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          hide-progress: true
+          scan-ref: '.'
+          template: '@/contrib/html.tpl'
+          severity: MEDIUM,HIGH,CRITICAL
+          output: trivyCode.html
+          args: '--skip-dev'
+      - name: Run security scan CONFIG
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          hide-progress: true
+          scan-ref: '.'
+          severity: MEDIUM,HIGH,CRITICAL
+          output: trivyConfig.txt
+          exit-code: 0
+          skip-setup-trivy: true
+          args: '--skip-dev'
+      - name: Publish Security scan CODE to Summary
+        run: |
+          if [[ -s trivyCode.html ]]; then
+            {
+              echo "### Security scan CODE Output"
+              echo "<details><summary>Click to expand</summary>"
+              echo ""
+              echo '```terraform'
+              cat trivyCode.html
+              echo '```'
+              echo "</details>"
+            } >> $GITHUB_STEP_SUMMARY
+          fi
+      - name: Publish Security scan CONFIG to Summary
+        run: |
+          if [[ -s trivyConfig.txt ]]; then
+            {
+              echo "### Security scan CONFIG Output"
+              echo "<details><summary>Click to expand</summary>"
+              echo ""
+              echo '```terraform'
+              cat trivyConfig.txt
+              echo '```'
+              echo "</details>"
+            } >> $GITHUB_STEP_SUMMARY
+          fi

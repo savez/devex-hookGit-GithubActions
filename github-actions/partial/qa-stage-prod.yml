@@ -1,0 +1,133 @@
+on:
+  workflow_call:
+    inputs:
+      runFlow:
+        required: true
+        type: boolean
+      envVariable:
+        required: true
+        type: string
+
+jobs:
+  qa:
+    name: QA
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.PAT }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          ref: master
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # -------------------------------
+      # Cache
+      # -------------------------------
+      - name: Cache node modules (solo per questa esecuzione)
+        uses: actions/cache@v4
+        with:
+          path: |
+            **/node_modules
+            ~/.cache/yarn
+          key: temp-yarn-cache-${{ github.run_id }}
+          restore-keys: |
+            temp-yarn-cache-${{ github.run_id }}
+      - name: Install node dependencies
+        run: yarn install
+      - name: Unit test
+        run: yarn test
+      - name: Lint
+        run: yarn lint
+
+      # -------------------------------
+      # Coverage
+      # -------------------------------
+      - name: Unit test & coverage
+        run: yarn test:coverage-summary
+      - name: Jest Coverage Comment
+        uses: MishaKav/jest-coverage-comment@main
+        with:
+          coverage-summary-path: ./reports-jest/coverage-summary.json
+          coverage-title: Coverage details
+          coverage-path: ./reports-jest/coverage.txt
+          title: Coverage JEST
+          summary-title: Coverage code
+          badge-title: Coverage
+          hide-comment: false
+          create-new-comment: false
+          hide-summary: false
+
+      # -------------------------------
+      # Cache Trivy database
+      # -------------------------------
+      - name: Cache Trivy database (week ${{ env.CACHE_WEEK }})
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/trivy
+            /root/.cache/trivy
+          key: ${{ runner.os }}-trivy-db-${{ env.CACHE_WEEK }}
+          restore-keys: |
+            ${{ runner.os }}-trivy-db-
+
+      # -------------------------------
+      # Security scans con Trivy
+      # -------------------------------
+       - name: Run security scan CODE
+        uses: aquasecurity/trivy-action@master
+        with:
+          args: '--skip-dev'
+          scan-type: fs
+          hide-progress: true
+          scan-ref: '.'
+          severity: MEDIUM,HIGH,CRITICAL
+          output: trivyCode.txt
+          exit-code: ${{ github.event.inputs.envVariable == 'prod' && '1' || '0' }}
+      - name: Run security scan CONFIG
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          hide-progress: true
+          scan-ref: '.'
+          severity: MEDIUM,HIGH,CRITICAL
+          output: trivyConfig.txt
+          exit-code: ${{ github.event.inputs.envVariable == 'prod' && '1' || '0' }}
+          skip-setup-trivy: true
+          args: '--skip-dev'
+
+      # -------------------------------
+      # Prepara contenuto del commento
+      # -------------------------------
+      - name: Prepare PR comment content
+        id: prepare-comment
+        run: |
+          COMMENT="### 🧪 QA Summary (week ${{ env.CACHE_WEEK }})\n"
+
+          if [[ -s ./reports-jest/coverage.txt ]]; then
+            COMMENT+="\n#### 🧩 Coverage Output\n\`\`\`terraform\n$(cat ./reports-jest/coverage.txt)\n\`\`\`\n"
+          fi
+
+          if [[ -s trivyConfig.txt ]]; then
+            COMMENT+="\n#### 🔐 Security Scan CONFIG\n\`\`\`terraform\n$(cat trivyConfig.txt)\n\`\`\`\n"
+          fi
+
+          if [[ -s trivyCode.txt ]]; then
+            COMMENT+="\n#### 🧱 Security Scan CODE (HTML summary)\nMost critical findings shown below:\n\`\`\`html\n$(head -n 20 trivyCode.html)\n...\n\`\`\`\n"
+          fi
+
+          echo "comment<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$COMMENT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # -------------------------------
+      # Pubblica commento nel PR
+      # -------------------------------
+      - name: Comment on PR
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body: ${{ steps.prepare-comment.outputs.comment }}
+          edit-mode: replace

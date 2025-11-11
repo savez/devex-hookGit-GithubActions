@@ -1,0 +1,51 @@
+name: Deploy production
+on: [workflow_dispatch]
+
+jobs:
+ call-template:
+  uses: ./partial/qa-stage-prod.yml
+  with:
+   runFlow: true
+   envVariable: stage
+ deploy:
+  name: Deploy
+  runs-on: ubuntu-latest
+  env:
+   GITHUB_TOKEN: ${{ secrets.PAT }}
+  steps:
+   - name: Get Node version from serverless.yml
+     id: get_node_version
+     run: |
+      # Estrai la versione dal runtime, ad esempio 'nodejs20.x' -> '20'
+      runtime=$(grep 'runtime:' serverless.yml | awk '{print $2}')
+      node_version=$(echo $runtime | sed -E 's/nodejs([0-9]+)\.x/\1/')
+      echo "node_version=$node_version" >> $GITHUB_OUTPUT
+   - name: Configure AWS Credentials
+     uses: aws-actions/configure-aws-credentials@v4.2.1
+     with:
+      aws-access-key-id: ${{secrets.KEY_ID}}
+      aws-secret-access-key: ${{secrets.KEY}}
+      aws-region: eu-west-1
+   - name: Check out code
+     uses: actions/checkout@v4
+     with:
+      ref: master
+   - uses: actions/setup-node@v4
+     with:
+      node-version: ${{ steps.get_node_version.outputs.node_version }}
+   # -------------------------------
+   # Cache
+   # -------------------------------
+   - name: Cache node modules (solo per questa esecuzione)
+     uses: actions/cache@v4
+     with:
+      path: |
+       **/node_modules
+       ~/.cache/yarn
+      key: temp-yarn-cache-${{ github.run_id }}
+      restore-keys: |
+       temp-yarn-cache-${{ github.run_id }}
+   - name: Install node dependencies
+     run: yarn install
+   - name: Deploy on AWS
+     run: yarn deploy prod

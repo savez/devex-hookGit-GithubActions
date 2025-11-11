@@ -1,0 +1,75 @@
+name: Deploy production
+on: [workflow_dispatch]
+
+jobs:
+  check-tag:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Checkout del codice
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Leggi la versione da package.json
+      - name: Get version from package.json
+        id: get_version
+        run: |
+          version=$(jq -r '.version' package.json)
+          echo "version=$version" >> $GITHUB_ENV
+
+      # 3. Controlla se il tag esiste già
+      - name: Check if tag exists
+        run: |
+          if git rev-parse "refs/tags/v$version" >/dev/null 2>&1; then
+            echo "❌ Tag v$version already exists!"
+            exit 1
+          else
+              echo "✅ Tag v$version is available."
+          fi
+  call-template:
+    uses: ./partial/qa-stage-prod.yml
+    with:
+      runFlow: true
+      envVariable: prod
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: qa
+    env:
+      GITHUB_TOKEN: ${{ secrets.PAT }}
+    steps:
+       - name: Get Node version from serverless.yml
+        id: get_node_version
+        run: |
+          # Estrai la versione dal runtime, ad esempio 'nodejs20.x' -> '20'
+          runtime=$(grep 'runtime:' serverless.yml | awk '{print $2}')
+          node_version=$(echo $runtime | sed -E 's/nodejs([0-9]+)\.x/\1/')
+          echo "node_version=$node_version" >> $GITHUB_OUTPUT
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4.2.1
+        with:
+          aws-access-key-id: ${{secrets.KEY_ID}}
+          aws-secret-access-key: ${{secrets.KEY}}
+          aws-region: eu-west-1
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          ref: master
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.get_node_version.outputs.node_version }}
+      # -------------------------------
+      # Cache
+      # -------------------------------
+      - name: Cache node modules (solo per questa esecuzione)
+        uses: actions/cache@v4
+        with:
+          path: |
+            **/node_modules
+            ~/.cache/yarn
+          key: temp-yarn-cache-${{ github.run_id }}
+          restore-keys: |
+            temp-yarn-cache-${{ github.run_id }}
+      - name: Install node dependencies
+        run: yarn install
+      - name: Deploy on AWS
+        run: yarn deploy prod

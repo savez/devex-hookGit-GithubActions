@@ -1,0 +1,17 @@
+commit-msg:
+ commands:
+  validate-commit-message:
+   run: ./scripts/validate_commit.sh
+   files: []
+pre-commit:
+ commands:
+  lint:
+   glob: "*.{js,jsx,ts,tsx}"
+   run: yarn lint {staged_files}
+   stage_fixed: true
+  test:
+   glob: "*.{js,jsx,ts,tsx,spec.js,test.js}"
+   run: yarn test --findRelatedTests {staged_files} --watchAll=false
+  copilot-review:
+   interactive: true
+   run: bash scripts/copilot-review.sh {staged_files}
