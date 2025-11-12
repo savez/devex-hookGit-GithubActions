@@ -2,195 +2,339 @@ name: QA
 on: pull_request
 
 jobs:
-  security-leaksKey:
-    name: Gitleaks Secret Scan
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
+ security-scan:
+  name: 🔒 Security Scan
+  runs-on: ubuntu-latest
+  permissions:
+   contents: read
+   pull-requests: write
+  outputs:
+   gitleaks-status: ${{ steps.gitleaks.outcome }}
+   gitleaks-violations: ${{ steps.parse.outputs.violations }}
+   gitleaks-count: ${{ steps.parse.outputs.count }}
+  env:
+   GITHUB_TOKEN: ${{ secrets.PAT }}
+   APP_ENV: "qa"
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Scarica tutta la cronologia per scansione completa
+  steps:
+   - name: 📥 Checkout code
+     uses: actions/checkout@v4
+     with:
+      fetch-depth: 0
 
-      - name: Run Gitleaks
-        id: gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true  # Continua per creare il commento anche se trova violazioni
+   # Gitleaks Scan
+   - name: 🔍 Run Gitleaks
+     id: gitleaks
+     uses: gitleaks/gitleaks-action@v2
+     env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+     continue-on-error: true
 
-      - name: Parse Gitleaks Results
-        if: steps.gitleaks.outcome == 'failure'
-        id: parse
-        run: |
-          if [ -f gitleaks-report.json ]; then
-            VIOLATIONS=$(jq -r '.[] | "- **Tipo:** \(.RuleID)\n  **File:** `\(.File)`\n  **Linea:** \(.StartLine)\n  **Match:** `\(.Match | gsub("\\n"; " "))`\n"' gitleaks-report.json)
+   - name: 📊 Parse Gitleaks Results
+     if: steps.gitleaks.outcome == 'failure'
+     id: parse
+     run: |
+      if [ -f gitleaks-report.json ]; then
+        VIOLATIONS=$(jq -r '.[] | "- **Tipo:** \(.RuleID)\n  **File:** `\(.File)`\n  **Linea:** \(.StartLine)\n  **Match:** `\(.Match | gsub("\\n"; " "))`\n"' gitleaks-report.json)
+        
+        echo "violations<<EOF" >> $GITHUB_OUTPUT
+        echo "$VIOLATIONS" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        
+        COUNT=$(jq '. | length' gitleaks-report.json)
+        echo "count=$COUNT" >> $GITHUB_OUTPUT
+      fi
 
-            echo "VIOLATIONS<<EOF" >> $GITHUB_ENV
-            echo "$VIOLATIONS" >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
+   # Trivy Scans
+   - name: 💾 Cache Trivy DB
+     uses: actions/cache@v4
+     with:
+      path: |
+       ~/.cache/trivy
+       /root/.cache/trivy
+      key: ${{ runner.os }}-trivy-db-${{ env.CACHE_WEEK }}
+      restore-keys: |
+       ${{ runner.os }}-trivy-db-
+     env:
+      CACHE_WEEK: ${{ github.event.pull_request.created_at }}
 
-            COUNT=$(jq '. | length' gitleaks-report.json)
-            echo "COUNT=$COUNT" >> $GITHUB_ENV
-          fi
+   - name: 🔍 Run Trivy - Code Scan
+     uses: aquasecurity/trivy-action@master
+     with:
+      scan-type: fs
+      hide-progress: true
+      scan-ref: "."
+      template: "@/contrib/html.tpl"
+      severity: MEDIUM,HIGH,CRITICAL
+      output: trivyCode.html
+      args: "--skip-dev"
 
-      - name: Comment PR with violations
-        if: steps.gitleaks.outcome == 'failure'
-        uses: peter-evans/create-or-update-comment@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          issue-number: ${{ github.event.pull_request.number }}
-          body: |
-            ## 🔒 Gitleaks Security Scan - Violazioni Rilevate
+   - name: 🔍 Run Trivy - Config Scan
+     uses: aquasecurity/trivy-action@master
+     with:
+      scan-type: config
+      hide-progress: true
+      scan-ref: "."
+      severity: MEDIUM,HIGH,CRITICAL
+      output: trivyConfig.txt
+      exit-code: 0
+      skip-setup-trivy: true
+      args: "--skip-dev"
 
-            ❌ **Trovate ${{ env.COUNT }} violazioni di sicurezza**
+   - name: 📤 Upload Trivy Reports
+     uses: actions/upload-artifact@v4
+     with:
+      name: trivy-reports
+      path: |
+       trivyCode.html
+       trivyConfig.txt
 
-            ### Dettagli:
-            ${{ env.VIOLATIONS }}
+   - name: ❌ Fail if Gitleaks found violations
+     if: steps.gitleaks.outcome == 'failure'
+     run: |
+      echo "❌ Gitleaks ha trovato violazioni di sicurezza!"
+      exit 1
 
-            ---
-            ⚠️ **La pipeline è stata bloccata.**  
-            Per favore rimuovi i segreti rilevati prima di procedere con il merge.
+ lint:
+  name: 🎨 Lint
+  runs-on: ubuntu-latest
+  env:
+   GITHUB_TOKEN: ${{ secrets.PAT }}
+   APP_ENV: "qa"
 
-            ### Come risolvere:
-            1. Rimuovi i segreti dai file indicati  
-            2. Se il segreto è già stato committato:
-              - Revoca o rigenera la credenziale compromessa  
-              - Rimuovila dalla cronologia Git (es. `git filter-branch` o `BFG Repo-Cleaner`)
-            3. Usa variabili d'ambiente o secret manager per gestire le credenziali
-          edit-mode: replace
-          comment-identifier: gitleaks-scan
+  steps:
+   - name: 📥 Checkout code
+     uses: actions/checkout@v4
 
-      - name: Comment PR on success
-        if: steps.gitleaks.outcome == 'success'
-        uses: peter-evans/create-or-update-comment@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          issue-number: ${{ github.event.pull_request.number }}
-          body: |
-            ## 🔒 Gitleaks Security Scan
+   - name: 📝 Get Node version from serverless.yml
+     id: get_node_version
+     run: |
+      runtime=$(grep 'runtime:' serverless.yml | awk '{print $2}')
+      node_version=$(echo $runtime | sed -E 's/nodejs([0-9]+)\.x/\1/')
+      echo "node_version=$node_version" >> $GITHUB_OUTPUT
 
-            ✅ **Nessuna violazione rilevata**
+   - name: ⚙️ Setup Node.js
+     uses: actions/setup-node@v4
+     with:
+      node-version: ${{ steps.get_node_version.outputs.node_version }}
 
-            La scansione non ha trovato segreti o credenziali esposte nel codice.
-          edit-mode: replace
-          comment-identifier: gitleaks-scan
+   - name: 📦 Install dependencies
+     run: yarn install
 
-      - name: Fail pipeline if violations found
-        if: steps.gitleaks.outcome == 'failure'
-        run: |
-          echo "❌ Gitleaks ha trovato violazioni di sicurezza!"
-          exit 1
-  qa:
-    name: QA
-    runs-on: ubuntu-latest
-    env:
-      GITHUB_TOKEN: ${{ secrets.PAT }}
-      APP_ENV: 'qa'
-    steps:
-       - name: Get Node version from serverless.yml
-        id: get_node_version
-        run: |
-          # Estrai la versione dal runtime, ad esempio 'nodejs20.x' -> '20'
-          runtime=$(grep 'runtime:' serverless.yml | awk '{print $2}')
-          node_version=$(echo $runtime | sed -E 's/nodejs([0-9]+)\.x/\1/')
-          echo "node_version=$node_version" >> $GITHUB_OUTPUT
-      - name: Check out repo
-        uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ steps.get_node_version.outputs.node_version }}
-      - name: Install node dependencies
-        run: yarn install
-      - name: Unit test
-        run: yarn test
-      - name: Lint
-        run: yarn lint
-      - name: Unit test & coverage
-        run: yarn test:coverage-summary && yarn report-coverage-details && exit ${PIPESTATUS[0]}
-      - name: Jest Coverage Comment
-        uses: MishaKav/jest-coverage-comment@main
-        with:
-          coverage-summary-path: ./reports-jest/coverage-summary.json
-          coverage-title: Coverage details
-          coverage-path: ./reports-jest/coverage.txt
-          title: Coverage JEST
-          summary-title: Coverage code
-          badge-title: Coverage
-          hide-comment: false
-          create-new-comment: false
-          hide-summary: false
-      - name: Report Coverage Output to Summary
-        run: |
-          if [[ -s ./reports-jest/coverage.txt ]]; then
-            {
-              echo "### Coverage Output"
-              echo "<details><summary>Click to expand</summary>"
-              echo ""
-              echo '```terraform'
-              cat ./reports-jest/coverage.txt
-              echo '```'
-              echo "</details>"
-            } >> $GITHUB_STEP_SUMMARY
-          fi
-      - name: name: Cache Trivy DB [${{ runner.os }} - week ${{ env.CACHE_WEEK }}]
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/trivy
-            /root/.cache/trivy
-          key: ${{ runner.os }}-trivy-db-${{ env.CACHE_WEEK }}
-          restore-keys: |
-            ${{ runner.os }}-trivy-db-
-        env:
-          CACHE_WEEK: ${{ date('Y-ww') }}
-      - name: Run security scan CODE
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          hide-progress: true
-          scan-ref: '.'
-          template: '@/contrib/html.tpl'
-          severity: MEDIUM,HIGH,CRITICAL
-          output: trivyCode.html
-          args: '--skip-dev'
-      - name: Run security scan CONFIG
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: config
-          hide-progress: true
-          scan-ref: '.'
-          severity: MEDIUM,HIGH,CRITICAL
-          output: trivyConfig.txt
-          exit-code: 0
-          skip-setup-trivy: true
-          args: '--skip-dev'
-      - name: Publish Security scan CODE to Summary
-        run: |
-          if [[ -s trivyCode.html ]]; then
-            {
-              echo "### Security scan CODE Output"
-              echo "<details><summary>Click to expand</summary>"
-              echo ""
-              echo '```terraform'
-              cat trivyCode.html
-              echo '```'
-              echo "</details>"
-            } >> $GITHUB_STEP_SUMMARY
-          fi
-      - name: Publish Security scan CONFIG to Summary
-        run: |
-          if [[ -s trivyConfig.txt ]]; then
-            {
-              echo "### Security scan CONFIG Output"
-              echo "<details><summary>Click to expand</summary>"
-              echo ""
-              echo '```terraform'
-              cat trivyConfig.txt
-              echo '```'
-              echo "</details>"
-            } >> $GITHUB_STEP_SUMMARY
-          fi
+   - name: 🎨 Run Lint
+     run: yarn lint
+
+ test:
+  name: 🧪 Test & Coverage
+  runs-on: ubuntu-latest
+  env:
+   GITHUB_TOKEN: ${{ secrets.PAT }}
+   APP_ENV: "qa"
+
+  steps:
+   - name: 📥 Checkout code
+     uses: actions/checkout@v4
+
+   - name: 📝 Get Node version from serverless.yml
+     id: get_node_version
+     run: |
+      runtime=$(grep 'runtime:' serverless.yml | awk '{print $2}')
+      node_version=$(echo $runtime | sed -E 's/nodejs([0-9]+)\.x/\1/')
+      echo "node_version=$node_version" >> $GITHUB_OUTPUT
+
+   - name: ⚙️ Setup Node.js
+     uses: actions/setup-node@v4
+     with:
+      node-version: ${{ steps.get_node_version.outputs.node_version }}
+
+   - name: 📦 Install dependencies
+     run: yarn install
+
+   - name: 🧪 Run Unit Tests
+     run: yarn test
+
+   - name: 📊 Run Coverage
+     run: yarn test:coverage-summary && yarn report-coverage-details && exit ${PIPESTATUS[0]}
+
+   - name: 📤 Upload Coverage Reports
+     uses: actions/upload-artifact@v4
+     with:
+      name: coverage-reports
+      path: |
+       ./reports-jest/coverage-summary.json
+       ./reports-jest/coverage.txt
+
+ qa-summary:
+  name: 📋 QA Summary
+  runs-on: ubuntu-latest
+  needs: [security-scan, lint, test]
+  if: always()
+  permissions:
+   contents: read
+   pull-requests: write
+
+  steps:
+   - name: 📥 Download Trivy Reports
+     uses: actions/download-artifact@v4
+     with:
+      name: trivy-reports
+     continue-on-error: true
+
+   - name: 📥 Download Coverage Reports
+     uses: actions/download-artifact@v4
+     with:
+      name: coverage-reports
+      path: ./reports-jest
+     continue-on-error: true
+
+   - name: 💬 Create PR Comment - Gitleaks Results
+     uses: peter-evans/create-or-update-comment@v4
+     if: needs.security-scan.outputs.gitleaks-status == 'failure'
+     with:
+      token: ${{ secrets.GITHUB_TOKEN }}
+      issue-number: ${{ github.event.pull_request.number }}
+      body: |
+       ## 🔒 Gitleaks Security Scan - Violazioni Rilevate
+
+       ❌ **Trovate ${{ needs.security-scan.outputs.gitleaks-count }} violazioni di sicurezza**
+
+       ### 📝 Dettagli:
+       ${{ needs.security-scan.outputs.gitleaks-violations }}
+
+       ---
+       ⚠️ **La pipeline è stata bloccata.**  
+       Per favore rimuovi i segreti rilevati prima di procedere con il merge.
+
+       ### 🛠️ Come risolvere:
+       1. Rimuovi i segreti dai file indicati  
+       2. Se il segreto è già stato committato:
+         - Revoca o rigenera la credenziale compromessa  
+         - Rimuovila dalla cronologia Git (es. `git filter-branch` o `BFG Repo-Cleaner`)
+       3. Usa variabili d'ambiente o secret manager per gestire le credenziali
+      edit-mode: replace
+      comment-identifier: gitleaks-scan
+
+   - name: 💬 Create PR Comment - Gitleaks Success
+     uses: peter-evans/create-or-update-comment@v4
+     if: needs.security-scan.outputs.gitleaks-status == 'success'
+     with:
+      token: ${{ secrets.GITHUB_TOKEN }}
+      issue-number: ${{ github.event.pull_request.number }}
+      body: |
+       ## 🔒 Gitleaks Security Scan
+
+       ✅ **Nessuna violazione rilevata**
+
+       La scansione non ha trovato segreti o credenziali esposte nel codice.
+      edit-mode: replace
+      comment-identifier: gitleaks-scan
+
+   - name: 💬 Jest Coverage Comment
+     uses: MishaKav/jest-coverage-comment@main
+     if: needs.test.result == 'success'
+     with:
+      coverage-summary-path: ./reports-jest/coverage-summary.json
+      coverage-title: 📊 Coverage details
+      coverage-path: ./reports-jest/coverage.txt
+      title: 🧪 Coverage JEST
+      summary-title: 📈 Coverage code
+      badge-title: Coverage
+      hide-comment: false
+      create-new-comment: false
+      hide-summary: false
+
+   - name: 📋 Create QA Summary Comment
+     uses: peter-evans/create-or-update-comment@v4
+     with:
+      token: ${{ secrets.GITHUB_TOKEN }}
+      issue-number: ${{ github.event.pull_request.number }}
+      body: |
+       ## 📋 QA Pipeline Summary
+
+       | Check | Status |
+       |-------|--------|
+       | 🔒 Security Scan | ${{ needs.security-scan.result == 'success' && '✅ Passed' || '❌ Failed' }} |
+       | 🎨 Lint | ${{ needs.lint.result == 'success' && '✅ Passed' || '❌ Failed' }} |
+       | 🧪 Test & Coverage | ${{ needs.test.result == 'success' && '✅ Passed' || '❌ Failed' }} |
+
+       ---
+       ${{ needs.security-scan.result == 'success' && needs.lint.result == 'success' && needs.test.result == 'success' && '✨ **Tutti i controlli sono passati!**' || '⚠️ **Alcuni controlli hanno fallito. Vedi i dettagli sopra.**' }}
+      edit-mode: replace
+      comment-identifier: qa-summary
+
+   - name: 📊 Publish Reports to Summary
+     run: |
+      echo "## 📊 QA Pipeline Results" >> $GITHUB_STEP_SUMMARY
+      echo "" >> $GITHUB_STEP_SUMMARY
+
+      # Job Status Summary
+      echo "### 📋 Jobs Status" >> $GITHUB_STEP_SUMMARY
+      echo "" >> $GITHUB_STEP_SUMMARY
+      echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+      echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+      echo "| 🔒 Security Scan | ${{ needs.security-scan.result == 'success' && '✅ Success' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+      echo "| 🎨 Lint | ${{ needs.lint.result == 'success' && '✅ Success' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+      echo "| 🧪 Test & Coverage | ${{ needs.test.result == 'success' && '✅ Success' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+      echo "" >> $GITHUB_STEP_SUMMARY
+
+      # Gitleaks Results
+      if [ "${{ needs.security-scan.outputs.gitleaks-status }}" == "failure" ]; then
+        {
+          echo "### 🔒 Gitleaks - Violazioni Rilevate"
+          echo ""
+          echo "❌ **Trovate ${{ needs.security-scan.outputs.gitleaks-count }} violazioni di sicurezza**"
+          echo ""
+          echo "<details><summary>📝 Dettagli violazioni</summary>"
+          echo ""
+          echo "${{ needs.security-scan.outputs.gitleaks-violations }}"
+          echo ""
+          echo "</details>"
+          echo ""
+        } >> $GITHUB_STEP_SUMMARY
+      else
+        echo "### 🔒 Gitleaks Security Scan" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Nessuna violazione rilevata**" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+      fi
+
+      # Coverage
+      if [[ -f ./reports-jest/coverage.txt ]]; then
+        {
+          echo "### 🧪 Coverage Output"
+          echo "<details><summary>Click to expand</summary>"
+          echo ""
+          echo '```'
+          cat ./reports-jest/coverage.txt
+          echo '```'
+          echo "</details>"
+          echo ""
+        } >> $GITHUB_STEP_SUMMARY
+      fi
+
+      # Trivy Code Scan
+      if [[ -f trivyCode.html ]]; then
+        {
+          echo "### 🔍 Security Scan - CODE"
+          echo "<details><summary>Click to expand</summary>"
+          echo ""
+          echo '```html'
+          cat trivyCode.html
+          echo '```'
+          echo "</details>"
+          echo ""
+        } >> $GITHUB_STEP_SUMMARY
+      fi
+
+      # Trivy Config Scan
+      if [[ -f trivyConfig.txt ]]; then
+        {
+          echo "### 🔍 Security Scan - CONFIG"
+          echo "<details><summary>Click to expand</summary>"
+          echo ""
+          echo '```'
+          cat trivyConfig.txt
+          echo '```'
+          echo "</details>"
+        } >> $GITHUB_STEP_SUMMARY
+      fi

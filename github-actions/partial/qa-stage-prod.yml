@@ -1,133 +1,237 @@
 on:
-  workflow_call:
-    inputs:
-      runFlow:
-        required: true
-        type: boolean
-      envVariable:
-        required: true
-        type: string
+ workflow_call:
+  inputs:
+   runFlow:
+    required: true
+    type: boolean
+   envVariable:
+    required: true
+    type: string
 
 jobs:
-  qa:
-    name: QA
-    runs-on: ubuntu-latest
-    env:
-      GITHUB_TOKEN: ${{ secrets.PAT }}
-    steps:
-      - name: Check out code
-        uses: actions/checkout@v4
-        with:
-          ref: master
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      # -------------------------------
-      # Cache
-      # -------------------------------
-      - name: Cache node modules (solo per questa esecuzione)
-        uses: actions/cache@v4
-        with:
-          path: |
-            **/node_modules
-            ~/.cache/yarn
-          key: temp-yarn-cache-${{ github.run_id }}
-          restore-keys: |
-            temp-yarn-cache-${{ github.run_id }}
-      - name: Install node dependencies
-        run: yarn install
-      - name: Unit test
-        run: yarn test
-      - name: Lint
-        run: yarn lint
+ # 🔐 Security Scan (Gitleaks + Trivy)
+ security-scan:
+  name: 🔐 Security Scan
+  runs-on: ubuntu-latest
+  env:
+   GITHUB_TOKEN: ${{ secrets.PAT }}
+  steps:
+   - name: Check out code
+     uses: actions/checkout@v4
+     with:
+      ref: master
 
-      # -------------------------------
-      # Coverage
-      # -------------------------------
-      - name: Unit test & coverage
-        run: yarn test:coverage-summary
-      - name: Jest Coverage Comment
-        uses: MishaKav/jest-coverage-comment@main
-        with:
-          coverage-summary-path: ./reports-jest/coverage-summary.json
-          coverage-title: Coverage details
-          coverage-path: ./reports-jest/coverage.txt
-          title: Coverage JEST
-          summary-title: Coverage code
-          badge-title: Coverage
-          hide-comment: false
-          create-new-comment: false
-          hide-summary: false
+   # -------------------------------
+   # 📦 Cache Trivy database
+   # -------------------------------
+   - name: Cache Trivy database (week ${{ env.CACHE_WEEK }})
+     uses: actions/cache@v4
+     with:
+      path: |
+       ~/.cache/trivy
+       /root/.cache/trivy
+      key: ${{ runner.os }}-trivy-db-${{ env.CACHE_WEEK }}
+      restore-keys: |
+       ${{ runner.os }}-trivy-db-
 
-      # -------------------------------
-      # Cache Trivy database
-      # -------------------------------
-      - name: Cache Trivy database (week ${{ env.CACHE_WEEK }})
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/trivy
-            /root/.cache/trivy
-          key: ${{ runner.os }}-trivy-db-${{ env.CACHE_WEEK }}
-          restore-keys: |
-            ${{ runner.os }}-trivy-db-
+   # -------------------------------
+   # 🔍 Security scans con Trivy
+   # -------------------------------
+   - name: Run security scan CODE
+     uses: aquasecurity/trivy-action@master
+     with:
+      args: "--skip-dev"
+      scan-type: fs
+      hide-progress: true
+      scan-ref: "."
+      severity: MEDIUM,HIGH,CRITICAL
+      output: trivyCode.txt
+      exit-code: ${{ github.event.inputs.envVariable == 'prod' && '1' || '0' }}
 
-      # -------------------------------
-      # Security scans con Trivy
-      # -------------------------------
-       - name: Run security scan CODE
-        uses: aquasecurity/trivy-action@master
-        with:
-          args: '--skip-dev'
-          scan-type: fs
-          hide-progress: true
-          scan-ref: '.'
-          severity: MEDIUM,HIGH,CRITICAL
-          output: trivyCode.txt
-          exit-code: ${{ github.event.inputs.envVariable == 'prod' && '1' || '0' }}
-      - name: Run security scan CONFIG
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: config
-          hide-progress: true
-          scan-ref: '.'
-          severity: MEDIUM,HIGH,CRITICAL
-          output: trivyConfig.txt
-          exit-code: ${{ github.event.inputs.envVariable == 'prod' && '1' || '0' }}
-          skip-setup-trivy: true
-          args: '--skip-dev'
+   - name: Run security scan CONFIG
+     uses: aquasecurity/trivy-action@master
+     with:
+      scan-type: config
+      hide-progress: true
+      scan-ref: "."
+      severity: MEDIUM,HIGH,CRITICAL
+      output: trivyConfig.txt
+      exit-code: ${{ github.event.inputs.envVariable == 'prod' && '1' || '0' }}
+      skip-setup-trivy: true
+      args: "--skip-dev"
 
-      # -------------------------------
-      # Prepara contenuto del commento
-      # -------------------------------
-      - name: Prepare PR comment content
-        id: prepare-comment
-        run: |
-          COMMENT="### 🧪 QA Summary (week ${{ env.CACHE_WEEK }})\n"
+   # -------------------------------
+   # 💾 Upload artifacts
+   # -------------------------------
+   - name: Upload security scan results
+     uses: actions/upload-artifact@v4
+     if: always()
+     with:
+      name: security-results
+      path: |
+       trivyCode.txt
+       trivyConfig.txt
 
-          if [[ -s ./reports-jest/coverage.txt ]]; then
-            COMMENT+="\n#### 🧩 Coverage Output\n\`\`\`terraform\n$(cat ./reports-jest/coverage.txt)\n\`\`\`\n"
-          fi
+ # 🧹 Lint
+ lint:
+  name: 🧹 Lint
+  runs-on: ubuntu-latest
+  env:
+   GITHUB_TOKEN: ${{ secrets.PAT }}
+  steps:
+   - name: Check out code
+     uses: actions/checkout@v4
+     with:
+      ref: master
 
-          if [[ -s trivyConfig.txt ]]; then
-            COMMENT+="\n#### 🔐 Security Scan CONFIG\n\`\`\`terraform\n$(cat trivyConfig.txt)\n\`\`\`\n"
-          fi
+   - uses: actions/setup-node@v4
+     with:
+      node-version: "20"
 
-          if [[ -s trivyCode.txt ]]; then
-            COMMENT+="\n#### 🧱 Security Scan CODE (HTML summary)\nMost critical findings shown below:\n\`\`\`html\n$(head -n 20 trivyCode.html)\n...\n\`\`\`\n"
-          fi
+   # -------------------------------
+   # 📦 Cache
+   # -------------------------------
+   - name: Cache node modules (solo per questa esecuzione)
+     uses: actions/cache@v4
+     with:
+      path: |
+       **/node_modules
+       ~/.cache/yarn
+      key: temp-yarn-cache-${{ github.run_id }}
+      restore-keys: |
+       temp-yarn-cache-${{ github.run_id }}
 
-          echo "comment<<EOF" >> $GITHUB_OUTPUT
-          echo -e "$COMMENT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+   - name: Install node dependencies
+     run: yarn install
 
-      # -------------------------------
-      # Pubblica commento nel PR
-      # -------------------------------
-      - name: Comment on PR
-        uses: peter-evans/create-or-update-comment@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          issue-number: ${{ github.event.pull_request.number }}
-          body: ${{ steps.prepare-comment.outputs.comment }}
-          edit-mode: replace
+   - name: Lint
+     run: yarn lint
+
+ # 🧪 Test & Coverage
+ test:
+  name: 🧪 Test & Coverage
+  runs-on: ubuntu-latest
+  env:
+   GITHUB_TOKEN: ${{ secrets.PAT }}
+  steps:
+   - name: Check out code
+     uses: actions/checkout@v4
+     with:
+      ref: master
+
+   - uses: actions/setup-node@v4
+     with:
+      node-version: "20"
+
+   # -------------------------------
+   # 📦 Cache
+   # -------------------------------
+   - name: Cache node modules (solo per questa esecuzione)
+     uses: actions/cache@v4
+     with:
+      path: |
+       **/node_modules
+       ~/.cache/yarn
+      key: temp-yarn-cache-${{ github.run_id }}
+      restore-keys: |
+       temp-yarn-cache-${{ github.run_id }}
+
+   - name: Install node dependencies
+     run: yarn install
+
+   - name: Unit test
+     run: yarn test
+
+   # -------------------------------
+   # 📊 Coverage
+   # -------------------------------
+   - name: Unit test & coverage
+     run: yarn test:coverage-summary
+
+   - name: Jest Coverage Comment
+     uses: MishaKav/jest-coverage-comment@main
+     with:
+      coverage-summary-path: ./reports-jest/coverage-summary.json
+      coverage-title: Coverage details
+      coverage-path: ./reports-jest/coverage.txt
+      title: Coverage JEST
+      summary-title: Coverage code
+      badge-title: Coverage
+      hide-comment: false
+      create-new-comment: false
+      hide-summary: false
+
+   # -------------------------------
+   # 💾 Upload artifacts
+   # -------------------------------
+   - name: Upload coverage results
+     uses: actions/upload-artifact@v4
+     if: always()
+     with:
+      name: coverage-results
+      path: |
+       ./reports-jest/coverage.txt
+       ./reports-jest/coverage-summary.json
+
+ # 📝 QA Summary
+ qa-summary:
+  name: 📝 QA Summary
+  runs-on: ubuntu-latest
+  needs: [security-scan, lint, test]
+  if: always()
+  steps:
+   # -------------------------------
+   # 📥 Download artifacts
+   # -------------------------------
+   - name: Download security results
+     uses: actions/download-artifact@v4
+     continue-on-error: true
+     with:
+      name: security-results
+      path: ./security-results
+
+   - name: Download coverage results
+     uses: actions/download-artifact@v4
+     continue-on-error: true
+     with:
+      name: coverage-results
+      path: ./coverage-results
+
+   # -------------------------------
+   # 📋 Prepara contenuto del commento
+   # -------------------------------
+   - name: Prepare PR comment content
+     id: prepare-comment
+     run: |
+      COMMENT="### 🧪 QA Summary (week ${{ env.CACHE_WEEK }})\n\n"
+      COMMENT+="**Job Results:**\n"
+      COMMENT+="- 🔐 Security Scan: ${{ needs.security-scan.result }}\n"
+      COMMENT+="- 🧹 Lint: ${{ needs.lint.result }}\n"
+      COMMENT+="- 🧪 Test: ${{ needs.test.result }}\n\n"
+
+      if [[ -f ./coverage-results/coverage.txt ]]; then
+        COMMENT+="#### 🧩 Coverage Output\n\`\`\`terraform\n$(cat ./coverage-results/coverage.txt)\n\`\`\`\n\n"
+      fi
+
+      if [[ -f ./security-results/trivyConfig.txt ]]; then
+        COMMENT+="#### 🔐 Security Scan CONFIG\n\`\`\`terraform\n$(cat ./security-results/trivyConfig.txt)\n\`\`\`\n\n"
+      fi
+
+      if [[ -f ./security-results/trivyCode.txt ]]; then
+        COMMENT+="#### 🧱 Security Scan CODE\n\`\`\`terraform\n$(cat ./security-results/trivyCode.txt)\n\`\`\`\n\n"
+      fi
+
+      echo "comment<<EOF" >> $GITHUB_OUTPUT
+      echo -e "$COMMENT" >> $GITHUB_OUTPUT
+      echo "EOF" >> $GITHUB_OUTPUT
+
+   # -------------------------------
+   # 💬 Pubblica commento nel PR
+   # -------------------------------
+   - name: Comment on PR
+     uses: peter-evans/create-or-update-comment@v4
+     with:
+      token: ${{ secrets.GITHUB_TOKEN }}
+      issue-number: ${{ github.event.pull_request.number }}
+      body: ${{ steps.prepare-comment.outputs.comment }}
+      edit-mode: replace
