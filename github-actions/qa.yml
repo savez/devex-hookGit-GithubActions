@@ -2,6 +2,88 @@ name: QA
 on: pull_request
 
 jobs:
+  security-leaksKey:
+    name: Gitleaks Secret Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Scarica tutta la cronologia per scansione completa
+
+      - name: Run Gitleaks
+        id: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true  # Continua per creare il commento anche se trova violazioni
+
+      - name: Parse Gitleaks Results
+        if: steps.gitleaks.outcome == 'failure'
+        id: parse
+        run: |
+          if [ -f gitleaks-report.json ]; then
+            VIOLATIONS=$(jq -r '.[] | "- **Tipo:** \(.RuleID)\n  **File:** `\(.File)`\n  **Linea:** \(.StartLine)\n  **Match:** `\(.Match | gsub("\\n"; " "))`\n"' gitleaks-report.json)
+
+            echo "VIOLATIONS<<EOF" >> $GITHUB_ENV
+            echo "$VIOLATIONS" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+
+            COUNT=$(jq '. | length' gitleaks-report.json)
+            echo "COUNT=$COUNT" >> $GITHUB_ENV
+          fi
+
+      - name: Comment PR with violations
+        if: steps.gitleaks.outcome == 'failure'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## 🔒 Gitleaks Security Scan - Violazioni Rilevate
+
+            ❌ **Trovate ${{ env.COUNT }} violazioni di sicurezza**
+
+            ### Dettagli:
+            ${{ env.VIOLATIONS }}
+
+            ---
+            ⚠️ **La pipeline è stata bloccata.**  
+            Per favore rimuovi i segreti rilevati prima di procedere con il merge.
+
+            ### Come risolvere:
+            1. Rimuovi i segreti dai file indicati  
+            2. Se il segreto è già stato committato:
+              - Revoca o rigenera la credenziale compromessa  
+              - Rimuovila dalla cronologia Git (es. `git filter-branch` o `BFG Repo-Cleaner`)
+            3. Usa variabili d'ambiente o secret manager per gestire le credenziali
+          edit-mode: replace
+          comment-identifier: gitleaks-scan
+
+      - name: Comment PR on success
+        if: steps.gitleaks.outcome == 'success'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## 🔒 Gitleaks Security Scan
+
+            ✅ **Nessuna violazione rilevata**
+
+            La scansione non ha trovato segreti o credenziali esposte nel codice.
+          edit-mode: replace
+          comment-identifier: gitleaks-scan
+
+      - name: Fail pipeline if violations found
+        if: steps.gitleaks.outcome == 'failure'
+        run: |
+          echo "❌ Gitleaks ha trovato violazioni di sicurezza!"
+          exit 1
   qa:
     name: QA
     runs-on: ubuntu-latest
