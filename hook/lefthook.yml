@@ -3,6 +3,16 @@ commit-msg:
   validate-commit-message:
    run: ./scripts/validate_commit.sh
    files: []
+pre-push:
+ commands:
+  copilot-review:
+   interactive: true
+   run: bash scripts/copilot-review.sh {staged_files}
+  documentation-swagger:
+   interactive: true
+   run: bash scripts/documentation-swagger.sh
+  check-documentation-markdown:
+   run: ./scripts/check-documentation-markdown.sh
 pre-commit:
  commands:
   lint:
@@ -12,6 +22,3 @@ pre-commit:
   test:
    glob: "*.{js,jsx,ts,tsx,spec.js,test.js}"
    run: yarn test --findRelatedTests {staged_files} --watchAll=false
-  copilot-review:
-   interactive: true
-   run: bash scripts/copilot-review.sh {staged_files}

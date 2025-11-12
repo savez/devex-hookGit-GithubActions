@@ -1,51 +1,61 @@
 #!/bin/bash
 
+# Definizione colori
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
 # Script per review interattiva con GitHub Copilot
 echo ""
-echo "🤖 GitHub Copilot Code Review"
-echo "================================"
+echo -e "${CYAN}${BOLD}🤖 GitHub Copilot Code Review${NC}"
+echo -e "${CYAN}================================${NC}"
 echo ""
-echo "File da revieware:"
+echo -e "${BOLD}File da revieware:${NC}"
 for file in "$@"; do
-  echo "  - $file"
+  echo -e "  ${BLUE}- $file${NC}"
 done
 echo ""
 
 # Chiedi conferma all'utente
-read -p "Vuoi che GitHub Copilot analizzi questi file? (s/N): " -n 1 -r
+read -p "$(echo -e ${YELLOW}Vuoi che GitHub Copilot analizzi questi file? \(s/N\): ${NC})" -n 1 -r
 echo ""
 
 if [[ ! $REPLY =~ ^[SsYy]$ ]]; then
-  echo "⏭️  Review saltata. Continuando con il commit..."
+  echo -e "${YELLOW}⏭️  Review saltata. Continuando con il commit...${NC}"
   exit 0
 fi
 
 echo ""
-echo "🔍 Analisi in corso..."
+echo -e "${CYAN}🔍 Analisi in corso...${NC}"
 echo ""
 
 # Verifica che gh copilot sia installato
 if ! command -v gh &> /dev/null || ! gh extension list | grep -q "gh-copilot"; then
-  echo "⚠️  GitHub Copilot CLI non installato."
-  echo "   Installa con: gh extension install github/gh-copilot"
+  echo -e "${RED}⚠️  GitHub Copilot CLI non installato.${NC}"
+  echo -e "   ${YELLOW}Installa con: gh extension install github/gh-copilot${NC}"
   exit 0
 fi
 
 HAS_ISSUES=false
 
 for file in "$@"; do
-  echo "📄 Reviewing: $file"
+  echo -e "${MAGENTA}📄 Reviewing: ${BOLD}$file${NC}"
   
   # Ottieni il contenuto del file staged
   CONTENT=$(git diff --cached "$file")
   
   if [ -z "$CONTENT" ]; then
-    echo "   ✅ Nessuna modifica"
+    echo -e "   ${GREEN}✅ Nessuna modifica${NC}"
     continue
   fi
   
   # Chiedi a Copilot di analizzare (versione semplificata)
-  echo "   🤖 Chiedendo a Copilot..."
+  echo -e "   ${CYAN}🤖 Chiedendo a Copilot...${NC}"
   
   # Crea un prompt più specifico
   PROMPT="Analizza questo diff per bug critici, vulnerabilità di sicurezza o errori logici. Sii conciso e riporta solo problemi reali:Agisci come un esperto security auditor e analizzatore di codice statico. Analizza i seguenti file per identificare:
@@ -112,12 +122,12 @@ Fornisci un report strutturato in questo formato:
 - **Tipologia:** [Credenziali/Sicurezza/Bug Logico/Best Practice]
 - **Severità:** [CRITICO/ALTO/MEDIO/BASSO]
 - **Confidenza:** [X]%
-- **File:** `path/to/file.js`
+- **File:** \`path/to/file.js\`
 - **Righe:** 45-47
 - **Codice Problematico:**
-```javascript
+\`\`\`javascript
   const apiKey = "sk-1234567890abcdef"; // ⚠️ HARDCODED API KEY
-```
+\`\`\`
 - **Descrizione:** Chiave API hardcoded nel codice sorgente. Questa può essere estratta facilmente da chiunque abbia accesso al repository.
 - **Impatto:** Accesso non autorizzato ai servizi esterni, possibile furto di dati o abuso del servizio.
 - **Raccomandazione:** 
@@ -125,10 +135,10 @@ Fornisci un report strutturato in questo formato:
   - Usare un secret manager (AWS Secrets Manager, HashiCorp Vault)
   - Revocare immediatamente la chiave esposta e generarne una nuova
 - **Fix Suggerito:**
-```javascript
+\`\`\`javascript
   const apiKey = process.env.API_KEY;
   if (!apiKey) throw new Error('API_KEY not configured');
-```
+\`\`\`
 
 ---
 
@@ -172,13 +182,13 @@ $CONTENT
   REVIEW=$(echo "$PROMPT" | gh copilot suggest 2>&1 || echo "Errore nella chiamata")
   
   # Mostra il risultato
-  echo "   Risposta:"
+  echo -e "   ${BOLD}Risposta:${NC}"
   echo "$REVIEW" | sed 's/^/   /'
   echo ""
   
   # Chiedi all'utente se vuole procedere
   if echo "$REVIEW" | grep -iE "(bug|error|vulnerability|issue|problem)" > /dev/null; then
-    read -p "   ⚠️  Trovati potenziali problemi. Continuare comunque? (s/N): " -n 1 -r
+    read -p "$(echo -e ${YELLOW}   ⚠️  Trovati potenziali problemi. Continuare comunque? \(s/N\): ${NC})" -n 1 -r
     echo ""
     if [[ ! $REPLY =~ ^[SsYy]$ ]]; then
       HAS_ISSUES=true
@@ -189,10 +199,10 @@ done
 
 if [ "$HAS_ISSUES" = true ]; then
   echo ""
-  echo "❌ Commit annullato dall'utente"
+  echo -e "${RED}❌ Commit annullato dall'utente${NC}"
   exit 1
 fi
 
 echo ""
-echo "✅ Review completata. Continuando con il commit..."
+echo -e "${GREEN}✅ Review completata. Continuando con il commit...${NC}"
 exit 0
